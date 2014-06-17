@@ -698,7 +698,7 @@ class Learner(object):
 
     def train(self, examples, param_grid=None, grid_search_folds=5,
               grid_search=True, grid_objective='f1_score_micro',
-              grid_jobs=None, shuffle=True):
+              grid_jobs=None, shuffle=True, partial_train=False, unique_classes=[]):
         '''
         Train a classification model and return the model, score, feature
         vectorizer, scaler, label dictionary, and inverse label dictionary.
@@ -738,6 +738,7 @@ class Learner(object):
         # Shuffle so that the folds are random for the inner grid search CV.
         # You can't shuffle a scipy sparse matrix in place, so unfortunately
         # we make a copy of everything (and then get rid of the old version)
+        print("examples shuffle: ", examples)
         if shuffle:
             ids, classes, features = sk_shuffle(examples.ids, examples.classes,
                                                 examples.features,
@@ -830,7 +831,15 @@ class Learner(object):
             self._model = grid_searcher.best_estimator_
             grid_score = grid_searcher.best_score_
         else:
-            self._model = estimator.fit(xtrain, classes)
+            if partial_train:
+                if self._model:
+                    estimator = self._model
+                    self._model = estimator.partial_fit(xtrain, classes)
+                else:
+                    self._model = estimator.partial_fit(xtrain, classes, list(unique_classes))
+                    # self._model = estimator.partial_fit(xtrain, classes, classes=[0, 1])
+            else:
+                self._model = estimator.fit(xtrain, classes)
             grid_score = 0.0
 
         return grid_score

@@ -19,7 +19,7 @@ import os
 import sys
 from collections import defaultdict
 from io import open
-from itertools import chain, combinations
+from itertools import chain, combinations, zip_longest
 
 import configparser  # Backported version from Python 3
 import numpy as np
@@ -28,8 +28,10 @@ from prettytable import PrettyTable, ALL
 from six import string_types, iterkeys, iteritems  # Python 2/3
 from six.moves import zip
 from sklearn.metrics import SCORERS
+from sklearn.feature_extraction import DictVectorizer, FeatureHasher
 
-from skll.data import ExamplesTuple, load_examples
+from skll.data import ExamplesTuple, load_examples, \
+                        load_examples_partial, get_unique_classes, get_unique_features
 from skll.learner import Learner, MAX_CONCURRENT_PROCESSES
 from skll.version import __version__
 
@@ -207,6 +209,7 @@ def _setup_config_parser(config_path):
                                         'grid_search': 'False',
                                         'objective': "f1_score_micro",
                                         'probability': 'False',
+                                        'partial_train': 'False',
                                         'fixed_parameters': '[]',
                                         'param_grids': '[]',
                                         'pos_label_str': '',
@@ -242,6 +245,7 @@ def _parse_config_file(config_path):
                          'Valid tasks are: {}'.format(' '.join(_VALID_TASKS)))
 
     experiment_name = config.get("General", "experiment_name")
+    partial_train = config.getboolean("General", "partial_train")
 
     # Input
     if config.has_option("Input", "learners"):
@@ -393,12 +397,182 @@ def _parse_config_file(config_path):
     train_set_name = os.path.basename(train_path)
     test_set_name = os.path.basename(test_path) if test_path else "cv"
 
-    return (experiment_name, task, label_col, train_set_name, test_set_name,
-            suffix, featuresets, model_path, do_grid_search, grid_objective,
-            probability, results_path, pos_label_str, feature_scaling,
-            min_feature_count, grid_search_jobs, cv_folds, fixed_parameter_list,
-            param_grid_list, featureset_names, learners, prediction_dir,
-            log_path, train_path, test_path, ids_to_floats, class_map)
+    return (experiment_name, task, partial_train, label_col, train_set_name,
+            test_set_name, suffix, featuresets, model_path, do_grid_search,
+            grid_objective, probability, results_path, pos_label_str,
+            feature_scaling, min_feature_count, grid_search_jobs, cv_folds,
+            fixed_parameter_list, param_grid_list, featureset_names, learners,
+            prediction_dir, log_path, train_path, test_path, ids_to_floats,
+            class_map)
+
+def _load_featureset_partial(dirpath, featureset, suffix, label_col='y',
+                     ids_to_floats=False, quiet=False, class_map=None,
+                     unlabelled=False, sparse=True):
+    '''
+    Load a list of feature files and merge them.
+
+    :param dirpath: Path to the directory that contains the feature files.
+    :type dirpath: str
+    :param featureset: List of feature file prefixes
+    :type featureset: str
+    :param suffix: Suffix to add to feature file prefixes to get full filenames.
+    :type suffix: str
+    :param label_col: Name of the column which contains the class labels.
+                      If no column with that name exists, or `None` is
+                      specified, the data is considered to be unlabelled.
+    :type label_col: str
+    :param ids_to_floats: Convert IDs to float to save memory. Will raise error
+                          if we encounter an a non-numeric ID.
+    :type ids_to_floats: bool
+    :param quiet: Do not print "Loading..." status message to stderr.
+    :type quiet: bool
+    :param class_map: Mapping from original class labels to new ones. This is
+                      mainly used for collapsing multiple classes into a single
+                      class. Anything not in the mapping will be kept the same.
+    :type class_map: dict from str to str
+    :param unlabelled: Is this test we're loading? If so, don't raise an error
+                       if there are no labels.
+    :type unlabelled: bool
+
+    :returns: The classes, IDs, features, and feature vectorizer representing
+              the given featureset.
+    :rtype: ExamplesTuple
+    '''
+
+    # Load a list of lists of examples, one list of examples per featureset.
+    file_names = sorted(os.path.join(dirpath, featfile + suffix) for featfile
+                        in featureset)
+    unique_features = [get_unique_features(file_name,
+                                            label_col=label_col,
+                                            ids_to_floats=ids_to_floats,
+                                            quiet=quiet,
+                                            class_map=class_map)
+                        for file_name in file_names]
+    m = list(map(dict.fromkeys, unique_features))
+    features_dict = [[x] for x in m]
+    # features_dict = [[{'Parch': 0, 'SibSp': 0}],[{'Embarked=C': 0, 'Embarked=Q': 0, 'Embarked=S': 0}]]
+
+    # print("unique_features: ", unique_features)
+    # input("wait")
+    example_tuples = [load_examples_partial(file_name,
+                                            label_col=label_col,
+                                            ids_to_floats=ids_to_floats,
+                                            quiet=quiet,
+                                            class_map=class_map)
+                        for file_name in file_names]
+
+    # print("example_tuples: ", example_tuples)
+    # for ex2 in example_tuples:
+    #     print("\tex2: ", ex2)
+    #     # print("ids: ", ex2.ids)
+    #     for ex in ex2:
+    #         print("\t\tex: ", ex)
+
+    while all(example_tuples):
+        # print("[0]: ", example_tuples[0].ids)
+        # print("[1]: ", example_tuples[1].ids)
+
+        # # Check that the IDs are unique within each file.
+        # for file_name, examples in zip(file_names, example_tuples):
+        #     ex_ids = examples.ids
+        #     print("ex_ids: ", ex_ids)
+        #     if len(ex_ids) != len(set(ex_ids)):
+        #         raise ValueError(('The example IDs are not unique in ' +
+        #                           '{}.').format(file_name))
+
+        # Check that the different feature files have the same IDs.
+        # To do this, make a sorted tuple of unique IDs for each feature file,
+        # and then make sure they are all the same by making sure the set has one
+        # item in it.
+        mismatch_num = len({tuple(sorted(examples.ids)) for examples in
+                            example_tuples})
+        if mismatch_num != 1:
+            raise ValueError(('The sets of example IDs in {} feature files do ' +
+                              'not match').format(mismatch_num))
+
+        # Make sure there is a unique label for every example (or no label, for
+        # "unseen" examples).
+        # To do this, find the unique (id, y) tuples, and then make sure that all
+        # those ids are unique.
+        unique_tuples = set(chain(*[[(curr_id, curr_label) for curr_id, curr_label
+                                     in zip(examples.ids, examples.classes)]
+                                    for examples in example_tuples if
+                                    any(x is not None for x in examples.classes)]))
+        if len({tup[0] for tup in unique_tuples}) != len(unique_tuples):
+            raise ValueError('At least two feature files have different labels ' +
+                             '(i.e., y values) for the same ID.')
+
+        # Now, create the final ExamplesTuple of examples with merged features
+        merged_vectorizer = None
+        merged_features = None
+        merged_ids = None
+        merged_classes = None
+
+        for (dic, examples) in zip(features_dict, example_tuples):
+            ids = examples.ids
+            classes = examples.classes
+            features_iter = examples.features
+            print("ids: ", ids)
+            print("classes: ", classes)
+            print("features: ", features_iter)
+
+            feat_vectorizer = DictVectorizer(sparse=sparse)
+            feat_vectorizer.fit(dic)
+
+            # features = feat_vectorizer.fit_transform(features_iter)
+            features = feat_vectorizer.transform(features_iter)
+            # print("feat_vectorizer: ", feat_vectorizer.get_feature_names())
+
+            # Combine feature matrices and vectorizers
+            if merged_features is not None:
+                # Check for duplicate feature names
+                if (set(merged_vectorizer.get_feature_names()) &
+                        set(feat_vectorizer.get_feature_names())):
+                    raise ValueError('Two feature files have the same feature!')
+
+                num_merged = merged_features.shape[1]
+                print("merged_features: ", merged_features)
+                print("features: ", features)
+                merged_features = sp.hstack([merged_features, features], 'csr')
+
+                # dictvectorizer sorts the vocabularies within each file
+                # print("items: ",feat_vectorizer.vocabulary_.items())
+                for feat_name, index in sorted(feat_vectorizer.vocabulary_.items(),
+                                               key=lambda x: x[1]):
+                    merged_vectorizer.vocabulary_[feat_name] = index + num_merged
+                    merged_vectorizer.feature_names_.append(feat_name)
+            else:
+                merged_features = features
+                merged_vectorizer = feat_vectorizer
+
+            # IDs should be the same for each ExamplesTuple, so only store once
+            if merged_ids is None:
+                merged_ids = ids
+            # Check that IDs are in the same order
+            elif not np.all(merged_ids == ids):
+                raise ValueError('IDs are not in the same order in each feature ' +
+                                 'file!')
+
+            # If current ExamplesTuple has labels, check that they don't conflict
+            if any(x is not None for x in classes):
+                # Classes should be the same for each ExamplesTuple, so store once
+                if merged_classes is None:
+                    merged_classes = classes
+                # Check that classes don't conflict, when specified
+                elif not np.all(merged_classes == classes):
+                    raise ValueError('Feature files have conflicting labels for ' +
+                                     'examples with the same ID!')
+
+        # Ensure that at least one file had classes if we're expecting them
+        if merged_classes is None and not unlabelled:
+            raise ValueError('No feature files in feature set contain class' +
+                             'labels!')
+        next(example_tuples[0])
+        next(example_tuples[1])
+
+        # print("merged feat_vectorizer: ", merged_vectorizer.get_feature_names())
+        yield ExamplesTuple(merged_ids, merged_classes, merged_features,
+                         merged_vectorizer)
 
 
 def _load_featureset(dirpath, featureset, suffix, label_col='y',
@@ -441,7 +615,7 @@ def _load_featureset(dirpath, featureset, suffix, label_col='y',
     example_tuples = [load_examples(file_name, label_col=label_col,
                                     ids_to_floats=ids_to_floats, quiet=quiet,
                                     class_map=class_map)
-                      for file_name in file_names]
+                        for file_name in file_names]
 
     # Check that the IDs are unique within each file.
     for file_name, examples in zip(file_names, example_tuples):
@@ -477,7 +651,10 @@ def _load_featureset(dirpath, featureset, suffix, label_col='y',
     merged_features = None
     merged_ids = None
     merged_classes = None
+    # print("example_tuples: ", example_tuples)
     for ids, classes, features, feat_vectorizer in example_tuples:
+        print("ids-loop: ", ids)
+        # print("features: ", features)
         # Combine feature matrices and vectorizers
         if merged_features is not None:
             # Check for duplicate feature names
@@ -489,6 +666,7 @@ def _load_featureset(dirpath, featureset, suffix, label_col='y',
             merged_features = sp.hstack([merged_features, features], 'csr')
 
             # dictvectorizer sorts the vocabularies within each file
+            print("items: ",feat_vectorizer.vocabulary_.items())
             for feat_name, index in sorted(feat_vectorizer.vocabulary_.items(),
                                            key=lambda x: x[1]):
                 merged_vectorizer.vocabulary_[feat_name] = index + num_merged
@@ -531,6 +709,7 @@ def _classify_featureset(args):
     # required keyword arguments.)
     experiment_name = args.pop("experiment_name")
     task = args.pop("task")
+    partial_train = args.pop("partial_train")
     job_name = args.pop("job_name")
     featureset = args.pop("featureset")
     learner_name = args.pop("learner_name")
@@ -594,10 +773,25 @@ def _classify_featureset(args):
         # load the training and test examples
         if task == 'cross_validate' or (not os.path.exists(modelfile) or
                                         overwrite):
-            train_examples = _load_featureset(train_path, featureset, suffix,
-                                              label_col=label_col,
-                                              ids_to_floats=ids_to_floats,
-                                              quiet=quiet, class_map=class_map)
+            if partial_train:
+                file_names = sorted(os.path.join(train_path, featfile + suffix) for featfile
+                                    in featureset)
+                unique_classes = get_unique_classes(file_names[0],
+                                                    label_col=label_col,
+                                                    ids_to_floats=ids_to_floats,
+                                                    quiet=quiet,
+                                                    class_map=class_map)
+                train_examples = _load_featureset_partial(train_path,
+                                                          featureset, suffix,
+                                                          label_col=label_col,
+                                                          ids_to_floats=ids_to_floats,
+                                                          quiet=quiet,
+                                                          class_map=class_map)
+            else:
+                train_examples = _load_featureset(train_path, featureset, suffix,
+                                                  label_col=label_col,
+                                                  ids_to_floats=ids_to_floats,
+                                                  quiet=quiet, class_map=class_map)
             # initialize a classifer object
             learner = Learner(learner_name,
                               probability=probability,
@@ -639,6 +833,7 @@ def _classify_featureset(args):
         # models when we're not.
         task_results = None
         if task == 'cross_validate':
+            # TODO: partial fit for CV
             print('\tcross-validating', file=log_file)
             task_results, grid_scores = learner.cross_validate(train_examples,
                                                                prediction_prefix=prediction_prefix,
@@ -658,12 +853,25 @@ def _classify_featureset(args):
                 if not isinstance(cv_folds, int):
                     grid_search_folds = cv_folds
 
-                best_score = learner.train(train_examples,
-                                           grid_search=grid_search,
-                                           grid_search_folds=grid_search_folds,
-                                           grid_objective=grid_objective,
-                                           param_grid=param_grid,
-                                           grid_jobs=grid_search_jobs)
+                if partial_train:
+                    print("train_examples: ", train_examples)
+                    for chunk_train_examples in train_examples:
+                        print("chunk_train: ", chunk_train_examples)
+                        best_score = learner.train(chunk_train_examples,
+                                                   grid_search=grid_search,
+                                                   grid_search_folds=grid_search_folds,
+                                                   grid_objective=grid_objective,
+                                                   param_grid=param_grid,
+                                                   grid_jobs=grid_search_jobs,
+                                                   partial_train=True,
+                                                   unique_classes=unique_classes);
+                else:
+                    best_score = learner.train(train_examples,
+                                               grid_search=grid_search,
+                                               grid_search_folds=grid_search_folds,
+                                               grid_objective=grid_objective,
+                                               param_grid=param_grid,
+                                               grid_jobs=grid_search_jobs)
                 grid_scores = [best_score]
 
                 # save model
@@ -924,12 +1132,13 @@ def run_configuration(config_file, local=False, overwrite=True, queue='all.q',
     logger = logging.getLogger(__name__)
 
     # Read configuration
-    (experiment_name, task, label_col, train_set_name, test_set_name, suffix,
-     featuresets, model_path, do_grid_search, grid_objective, probability,
-     results_path, pos_label_str, feature_scaling, min_feature_count,
-     grid_search_jobs, cv_folds, fixed_parameter_list, param_grid_list,
-     featureset_names, learners, prediction_dir, log_path, train_path,
-     test_path, ids_to_floats, class_map) = _parse_config_file(config_file)
+    (experiment_name, task, partial_train, label_col, train_set_name,
+     test_set_name, suffix, featuresets, model_path, do_grid_search,
+     grid_objective, probability, results_path, pos_label_str,
+     feature_scaling, min_feature_count, grid_search_jobs, cv_folds,
+     fixed_parameter_list, param_grid_list, featureset_names, learners,
+     prediction_dir, log_path, train_path, test_path, ids_to_floats,
+     class_map) = _parse_config_file(config_file)
 
     # Check if we have gridmap
     if not local and not _HAVE_GRIDMAP:
@@ -984,7 +1193,6 @@ def run_configuration(config_file, local=False, overwrite=True, queue='all.q',
     # Run each featureset-learner combination
     for featureset, featureset_name in zip(featuresets, featureset_names):
         for learner_num, learner_name in enumerate(learners):
-
             job_name_components = [experiment_name]
 
             # for the individual job name, we need to add the feature set name
@@ -1017,6 +1225,7 @@ def run_configuration(config_file, local=False, overwrite=True, queue='all.q',
             job_args = {}
             job_args["experiment_name"] = experiment_name
             job_args["task"] = task
+            job_args["partial_train"] = partial_train
             job_args["job_name"] = job_name
             job_args["featureset"] = featureset
             job_args["learner_name"] = learner_name
