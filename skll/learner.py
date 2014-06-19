@@ -738,7 +738,7 @@ class Learner(object):
         # Shuffle so that the folds are random for the inner grid search CV.
         # You can't shuffle a scipy sparse matrix in place, so unfortunately
         # we make a copy of everything (and then get rid of the old version)
-        print("examples shuffle: ", examples)
+        # print("examples shuffle: ", examples)
         if shuffle:
             ids, classes, features = sk_shuffle(examples.ids, examples.classes,
                                                 examples.features,
@@ -1110,6 +1110,7 @@ class Learner(object):
             kfold = (StratifiedKFold(examples.classes, n_folds=cv_folds) if
                      stratified else KFold(len(examples.classes),
                                            n_folds=cv_folds))
+            print("kfold: ", kfold)
         else:
             # if we have a mapping from IDs to folds, use it for the overall
             # cross-validation as well as the grid search within each
@@ -1118,6 +1119,7 @@ class Learner(object):
             # the outer cross-validation.
             # Only retain IDs within folds if they're in grid_search_folds
             dummy_label = next(itervalues(cv_folds))
+            print("dummy_label: ", dummy_label)
             labels = [cv_folds.get(curr_id, dummy_label) for curr_id in
                       examples.ids]
             # Only retain IDs within folds if they're in cv_folds

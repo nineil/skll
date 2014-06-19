@@ -512,9 +512,9 @@ def _load_featureset_partial(dirpath, featureset, suffix, label_col='y',
             ids = examples.ids
             classes = examples.classes
             features_iter = examples.features
-            print("ids: ", ids)
-            print("classes: ", classes)
-            print("features: ", features_iter)
+            # print("ids: ", ids)
+            # print("classes: ", classes)
+            # print("features: ", features_iter)
 
             feat_vectorizer = DictVectorizer(sparse=sparse)
             feat_vectorizer.fit(dic)
@@ -531,8 +531,8 @@ def _load_featureset_partial(dirpath, featureset, suffix, label_col='y',
                     raise ValueError('Two feature files have the same feature!')
 
                 num_merged = merged_features.shape[1]
-                print("merged_features: ", merged_features)
-                print("features: ", features)
+                # print("merged_features: ", merged_features)
+                # print("features: ", features)
                 merged_features = sp.hstack([merged_features, features], 'csr')
 
                 # dictvectorizer sorts the vocabularies within each file
@@ -653,7 +653,7 @@ def _load_featureset(dirpath, featureset, suffix, label_col='y',
     merged_classes = None
     # print("example_tuples: ", example_tuples)
     for ids, classes, features, feat_vectorizer in example_tuples:
-        print("ids-loop: ", ids)
+        # print("ids-loop: ", ids)
         # print("features: ", features)
         # Combine feature matrices and vectorizers
         if merged_features is not None:
@@ -666,7 +666,7 @@ def _load_featureset(dirpath, featureset, suffix, label_col='y',
             merged_features = sp.hstack([merged_features, features], 'csr')
 
             # dictvectorizer sorts the vocabularies within each file
-            print("items: ",feat_vectorizer.vocabulary_.items())
+            # print("items: ",feat_vectorizer.vocabulary_.items())
             for feat_name, index in sorted(feat_vectorizer.vocabulary_.items(),
                                            key=lambda x: x[1]):
                 merged_vectorizer.vocabulary_[feat_name] = index + num_merged
@@ -854,9 +854,9 @@ def _classify_featureset(args):
                     grid_search_folds = cv_folds
 
                 if partial_train:
-                    print("train_examples: ", train_examples)
+                    # print("train_examples: ", train_examples)
                     for chunk_train_examples in train_examples:
-                        print("chunk_train: ", chunk_train_examples)
+                        # print("chunk_train: ", chunk_train_examples)
                         best_score = learner.train(chunk_train_examples,
                                                    grid_search=grid_search,
                                                    grid_search_folds=grid_search_folds,
